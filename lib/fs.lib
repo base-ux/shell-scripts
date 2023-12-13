@@ -1,0 +1,124 @@
+#!/usr/bin/ksh
+#
+# File functions for scripts
+#
+
+# Prolog to determine if sys.lib has sourced
+if [[ -z "${SRC_SYS_LIB}" ]]; then
+    BASE_DIR=${BASE_DIR:-/usr/scripts}
+    SYS_LIB=${BASE_DIR}/lib/_sys.lib
+    if [[ ! -f ${SYS_LIB} ]]; then
+	# If we can't source sys.lib we can't do anything
+	echo "$0: ${SYS_LIB} not found" >&2 && exit 1
+    fi
+    . ${SYS_LIB}
+fi
+
+################
+# Functions
+################
+
+# Description: Test absolute path
+# Input: $1 - path
+# Output: none
+# Return: 0 - the path is absolute, 1 - otherwise
+function fs_is_abspath
+{
+    typeset _path="$1"
+    typeset _rc
+
+    [[ "${_path}" = /* ]] && _rc=0 || _rc=1
+    return ${_rc}
+}
+
+# Description: Determine real path from symlink
+#   Some substitution for readlink utility from Linux :)
+# Input: $1 - path
+# Output: Real path is printed to stdout
+# Return: none
+function fs_readlink
+{
+    typeset _f="$1"
+    typeset _ls _l _d
+
+    if [[ -x /usr/bin/readlink ]]; then
+	_f="$(/usr/bin/readlink -m "${_f}" 2>/dev/null)"
+    elif [[ -x /opt/freeware/bin/readlink ]]; then
+	_f="$(/opt/freeware/bin/readlink -m "${_f}" 2>/dev/null)"
+    else
+	while [[ -L "${_f}" ]]
+	do
+	    # Look the link path from 'ls' output
+	    _ls="$(command -p ls -l -- "${_f}")"
+	    # Remove all except the link path itself
+	    _l="${_ls##* -\> }"
+	    # If the link path is absolute then just check
+	    # if itself is symlink
+	    [[ "${_l}" = /* ]] && { _f="${_l}"; continue; }
+	    # Otherwise link path is relative
+	    _d="${_f%/*}"	# dirname
+	    # If dirname and filename is the same
+	    # then assume dirname is current working directory
+	    [[ "${_d}" = "${_f}" ]] && _d=.
+	    # Check the link path attached to dirname
+	    _f="${_d}/${_l}"
+	done
+    fi
+    echo "${_f}"
+}
+
+# Description: Read file with the list of entries
+#   The function processes comments ('#' in the beginning of line)
+#   and include other files ('%' in the beginning of line)
+# Input: $1 - path
+# Output: The list of entries printed to stdout
+# Return: none
+function fs_read_listfile
+{
+    typeset _f="$1"
+    typeset _str
+    typeset _dir _if
+
+    # If the path is not absolute
+    # then check path relative to CONF_DIR directory
+    fs_is_abspath "${_f}" || _f="${CONF_DIR}/${_f}"
+    # Convert path to real path
+    _f="$(fs_readlink "${_f}")"
+
+    # Add current file in the list of processed files
+    if [[ -z "${_FS_LISTFILE}" ]]; then
+	_FS_LISTFILE="${_f}"
+    else
+	# Check if current file is already processed
+	case " ${_FS_LISTFILE} " in
+	*" ${_f} "* ) return ;;		# Found
+	* ) _FS_LISTFILE="${_FS_LISTFILE} ${_f}" ;;
+	esac
+    fi
+
+    # Process current file
+    if [[ -f "${_f}" ]]; then
+	# Read file line by line
+	while read -r _str
+	do
+	    case "${_str}" in
+	    '' | \#* )
+		continue ;;	# Skip empty lines and comments
+	    \%* ) # '%' instructs to include specified file
+		# Get file name
+		_if="${_str#\%}"		# Remove '%'
+		_if="${_if%%*([[:space:]])}"	# Remove trailing spaces
+		_if="${_if##*([[:space:]])}"	# Remove leading spaces
+		# If the path is not absolute
+		# then check path relative to current file directory
+		_dir="${_f%/*}"; _dir="${_dir:-/}"	# dirname
+		fs_is_abspath "${_if}" || _if="${_dir}/${_if}"
+		fs_read_listfile "${_if}"
+		continue
+		;;
+	    esac
+	    # Print line
+	    echo "${_str}"
+	done < "${_f}"
+    fi
+}

@@ -1,0 +1,314 @@
+#!/usr/bin/ksh
+#
+# Common variables and functions for scripts
+#
+
+# Check if the file has been sourced
+[[ "${SRC_SYS_LIB}" = "yes" ]] && return
+
+# Set flag variable that this file is sourced
+SRC_SYS_LIB=yes
+
+# Set program name
+PROG_NAME="${0##*/}"
+
+# DEPRECATED
+# Set PROG_DIR as absolute directory path of the calling script
+PROG_DIR=$(cd -P -- "$(dirname -- $0)" && pwd -P)
+
+# BASE_DIR is the root directory for scripts framework
+# If BASE_DIR is not set by the calling script (or by _sys.lib)
+# then set it to the default path
+BASE_DIR="${BASE_DIR:-/usr/scripts}"
+
+# Define some directories
+BIN_DIR="${BASE_DIR}/bin"
+LIB_DIR="${BASE_DIR}/lib"
+CONF_DIR="${CONF_DIR:-${BASE_DIR}/etc}"
+TMP_DIR="${TMP_DIR:-/tmp}"
+
+# Global variables (set in Main section)
+SYS_HOST=
+SYS_UID=
+SYS_USER=
+SYS_IS_ROOT=
+SYS_PWD=
+
+################
+# Functions
+################
+
+# Description: Print error message to stderr
+# Input: $1 - message text
+# Output: message text prepended with program name
+# Return: none
+function sys_err_msg
+{
+    typeset _msg="$@"
+
+    echo "${PROG_NAME}: ERROR: ${_msg}" >&2
+}
+
+# Description: Print warning message to stderr
+# Input: $1 - message text
+# Output: message text prepended with program name
+# Return: none
+function sys_warn_msg
+{
+    typeset _msg="$@"
+
+    echo "${PROG_NAME}: WARNING: ${_msg}" >&2
+}
+
+# Description: Print error message to stderr and exit script
+# Input: $1 - message text; $2 - (optional) exit code
+# Output: message text prepended with program name
+# Return: none
+function sys_err_exit
+{
+    typeset _msg=$1
+    typeset _rc=$2
+
+    # Default exit code is '1' if exit code is not set
+    [[ -z "${_rc}" ]] && _rc=1
+    sys_err_msg "${_msg}"
+    exit ${_rc}
+}
+
+# Description: Generate command to source library files
+# Input: names of the libraries
+# Output: command list to execute with eval command
+# Return: none
+function sys_source_lib
+{
+    typeset _args="$@"
+    typeset _lib _lib_f _var
+    typeset _cmd=":"
+
+    if [[ -n "${_args}" ]]; then
+	for _lib in ${_args}
+	do
+	    # Check if library file is already sourced
+	    _var=$(echo "${_lib}" | tr -cd '[:alnum:]' | tr '[:lower:]' '[:upper:]')
+	    eval _is_src=\${SRC_${_var}_LIB}
+	    if [[ -n "${_is_src}" ]]; then
+		# If library file was already sourced do nothing
+		_cmd="${_cmd}; :"
+	    else
+		# Library file is always considered relative to LIB_DIR directory
+		# File name for library is formed with LIB_DIR path and .lib extension
+		_lib_f=${LIB_DIR}/${_lib}.lib
+		_cmd="${_cmd}; \
+		    if [[ -f ${_lib_f} ]]; then \
+			SRC_${_var}_LIB=\"yes\"; \
+			. ${_lib_f}; \
+		    else \
+			sys_err_exit \"${_lib_f} not found\"; \
+		    fi"
+	    fi
+	done
+    fi
+    echo "${_cmd}"
+}
+
+# DEPRECATED
+# Description: Generate command to source configuration file
+# Input: file name of the configuration file
+# Output: command list to execute with eval command
+# Return: none
+function sys_source_conf
+{
+    typeset _conf=$1
+
+    # If there is no input parameter print 'empty' shell command
+    if [[ -z "${_conf}" ]]; then
+	echo ":"
+    fi
+
+    # Input file name may be absolute or relative path
+    # The latter is considered relative to CONF_DIR directory
+    if [[ "${_conf}" != /* ]]; then
+	_conf=${CONF_DIR}/${_conf}
+    fi
+    echo "if [[ -f ${_conf} ]]; then . ${_conf}; fi"
+}
+
+## Local
+# Description: Parse variable=value pair and set variables
+# Input: $1 - variable type, $2 - variable=value pair
+# Output: none
+# Return: none
+function _sys_setvar
+{
+    typeset _t="$1"
+    typeset _arg="$2"
+    typeset _var _val
+
+    # Variable name should contain only letters, numbers and underscore
+    if [[ "${_arg}" != +([A-Za-z0-9_])=* ]]; then
+	sys_warn_msg "Bad variable assignment: ${_arg}"
+    else
+	# Separate variable from value
+	_var="${_arg%%=*}"
+	_val="${_arg#*=}"
+	# Assign the value to <type>_var variable
+	eval ${_t}_${_var}=\"\${_val}\"
+	if [[ "${_t}" = "DEF" ]]; then
+	    # Add variable to the list of used variables
+	    if [[ -z "${_SYS_PROG_VARS}" ]]; then
+		_SYS_PROG_VARS="${_var}"
+	    else
+		# Add variable only if it is not in the list already
+		case " ${_SYS_PROG_VARS} " in
+		*" ${_var} "* ) ;;
+		* ) _SYS_PROG_VARS="${_SYS_PROG_VARS} ${_var}" ;;
+		esac
+	    fi
+	fi
+    fi
+}
+
+# Description: Set variables from defaults
+# Input: list of variable=value pairs
+# Output: none
+# Return: none
+function sys_setdefvar
+{
+    typeset _arg
+
+    if [[ $# -gt 0 ]]; then
+	for _arg in "$@"
+	do
+	    _sys_setvar DEF "${_arg}"
+	done
+    fi
+}
+
+# Description: Set variables from getopts
+# Input: list of variable=value pairs
+# Output: none
+# Return: none
+function sys_setoptvar
+{
+    typeset _arg
+
+    if [[ $# -gt 0 ]]; then
+	for _arg in "$@"
+	do
+	    _sys_setvar OPT "${_arg}"
+	done
+    fi
+}
+
+# Description: Set variables (from default, config, environment and options)
+# Input: none
+# Output: none
+# Return: none
+function sys_setvars
+{
+    typeset _t _v
+
+    if [[ -n "${_SYS_PROG_VARS}" ]]; then
+	# Check and save environment variables with the names in _SYS_PROG_VARS
+	for _v in ${_SYS_PROG_VARS}
+	do
+	    eval ENV_${_v}=\"\${${_v}:-}\"
+	done
+	# Set configuration variables with the respect of priority:
+	# 1. Highest priority is from command line options
+	# 2. Then values from environment
+	# 3. Then values from configuration file
+	# 4. Lowest priority is from default values
+	for _v in ${_SYS_PROG_VARS}
+	do
+	    # Process variables from lower priority to higher
+	    # This allows to overwrite variables with higer priority values
+	    for _t in DEF CNF ENV OPT
+	    do
+		eval _${_v}=\"\${${_t}_${_v}:-\${_${_v}}}\"
+	    done
+	    eval ${_v}=\"\${_${_v}}\"
+	done
+    fi
+}
+
+# Description: Read configuration file
+# Input: file name of the configuration file
+# Output: none
+# Return: none
+function sys_read_conf
+{
+    typeset _conf="$1"
+    typeset -i _line=0
+    typeset _str
+    typeset _var _val
+
+    if [[ -n "${_conf}" ]]; then
+	# Input file name may be absolute or relative path
+	# The latter is considered relative to CONF_DIR directory
+	if [[ "${_conf}" != /* ]]; then
+	    _conf="${CONF_DIR}/${_conf}"
+	fi
+	# Set CONF_DIR to the path
+	# where actual configuration file is located
+	CONF_DIR="${_conf%/*}"; CONF_DIR="${CONF_DIR:-/}"
+	if [[ -f "${_conf}" ]]; then
+	    exec 3< "${_conf}"
+	    # Read file line by line
+	    while read -r -u3 _str
+	    do
+		_line=$((_line+1))
+		case "${_str}" in
+		'' | \#* )
+		    continue ;;	# Skip empty lines and comments
+		*=* )
+		    _var="${_str%%=*}"	# Variable name
+		    _val="${_str#*=}"	# Variable value
+
+		    # Normalize variable name
+		    _var="${_var%%*([[:space:]])}"	# Remove trailing spaces
+		    _var="${_var##*([[:space:]])}"	# Remove leading spaces
+		    # Variable name should contain only letters, numbers and underscore
+		    case "${_var}" in
+		    *[!A-Za-z0-9_]* | [0-9]* )
+			sys_warn_msg "${_conf}: bad variable name '${_var}' at line ${_line}"
+			continue ;;
+		    esac
+
+		    # Normalize variable value
+		    _val="${_val%%\#*}"			# Remove rightmost comment
+		    _val="${_val%%*([[:space:]])}"	# Remove trailing spaces
+		    _val="${_val##*([[:space:]])}"	# Remove leading spaces
+		    _val="${_val%\"*}"			# Remove rightmost quote
+		    _val="${_val#\"}"			# Remove leftmost quote
+
+		    # Set CNF_var variable
+		    _sys_setvar CNF "${_var}=${_val}"
+		    ;;
+		* )
+		    sys_warn_msg "${_conf}: syntax error at line ${_line}" ;;
+		esac
+	    done
+	    exec 3<&-
+	fi
+    fi
+}
+
+################
+# Main section
+################
+
+# Set global variables
+SYS_HOST="$(hostname)"
+SYS_UID="$(id -u)"
+SYS_USER="$(id -un)"
+[[ ${SYS_UID} -eq 0 ]] && SYS_IS_ROOT=yes || SYS_IS_ROOT=no
+SYS_PWD="$(pwd -P)"
+
+# For bash turn on extglob shell option
+if [[ -n "${BASHOPTS}" ]]; then
+    case ":${BASHOPTS}:" in
+    *:extglob:* ) ;;	# Already turned on
+    * ) shopt -s extglob ;;
+    esac
+fi

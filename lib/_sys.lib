@@ -1,0 +1,85 @@
+#!/usr/bin/ksh
+#
+# Bootstrap code to source appropriate sys.lib
+#
+
+# The idea is to put this file in "well-known" place
+# e.g. /usr/scripts/lib/_sys.lib and source it from the scripts.
+# If the script is invoked by using symlink
+# then this code determine the "real" path to the script
+# and in its turn source sys.lib from the base directory
+# relative to the "real" path, not symlink path
+
+# Default BASE_DIR and SYS_LIB are used when
+# appropriate sys.lib could not be found
+_BASE_DIR=/usr/scripts
+_SYS_LIB=${_BASE_DIR}/lib/sys.lib
+
+# Function to determine real path from symlink
+function _readlink
+{
+    typeset _f="$1"
+    typeset _ls _l _d
+
+    if [[ -x /usr/bin/readlink ]]; then
+	_f="$(/usr/bin/readlink -m "${_f}" 2>/dev/null)"
+    elif [[ -x /opt/freeware/bin/readlink ]]; then
+	_f="$(/opt/freeware/bin/readlink -m "${_f}" 2>/dev/null)"
+    else
+	# Some substitution for readlink utility from Linux :)
+	while [[ -L "${_f}" ]]
+	do
+	    # Look the link path from 'ls' output
+	    _ls="$(command -p ls -l -- "${_f}" 2>/dev/null)"
+	    # Remove all except the link path itself
+	    _l="${_ls##* -\> }"
+	    # If the link path is absolute then just check
+	    # if itself is symlink
+	    [[ "${_l}" = /* ]] && { _f="${_l}"; continue; }
+	    # Otherwise link path is relative
+	    _d="${_f%/*}"	# dirname
+	    # If dirname and filename is the same
+	    # then assume dirname is current working directory
+	    [[ "${_d}" = "${_f}" ]] && _d=.
+	    # Check the link path attached to dirname
+	    _f="${_d}/${_l}"
+	done
+    fi
+    echo "${_f}"
+}
+
+# Check the path of the invoking script is the symlink
+# and if it is then determine the "real" script path
+_path="$0"
+[[ -L "${_path}" ]] && _path="$(_readlink "${_path}")"
+
+# dirname of the _path
+_dir="${_path%/*}"
+[[ "${_dir}" = "${_path}" ]] && _dir=.
+
+# Define "real" BASE_DIR
+# If we can't cd to the specified directory for some reason
+# then BASE_DIR will be empty (check for this later)
+BASE_DIR="$(command cd -P -- "${_dir}/.." 2>/dev/null && pwd -P)"
+
+# Check appropriate sys.lib from BASE_DIR
+SYS_LIB="${BASE_DIR}/lib/sys.lib"
+if [[ -z "${BASE_DIR}" || ! -f "${SYS_LIB}" ]]; then
+    # If not found then check default sys.lib
+    if [[ -f "${_SYS_LIB}" ]]; then
+	# If found then set BASE_DIR and SYS_LIB to default values
+	BASE_DIR="${_BASE_DIR}"
+	SYS_LIB="${_SYS_LIB}"
+    else
+	# If we can't source sys.lib we can't do anything
+	echo "$0: sys.lib not found" >&2 && exit 1
+    fi
+fi
+
+# Unset used entities
+unset _BASE_DIR _SYS_LIB
+unset _path _dir
+unset -f _readlink
+
+# Well, source sys.lib finally
+. "${SYS_LIB}"
